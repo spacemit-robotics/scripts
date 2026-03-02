@@ -1,0 +1,41 @@
+# Reusable Workflow: Code style check for PRs
+# Called by sub-repos via workflow_call
+name: Code Style (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      repo_path:
+        description: 'Path of the repo in workspace, e.g. components/peripherals/motor or demo-repository'
+        required: true
+        type: string
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout triggering repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: repo_source
+
+      - name: Setup workspace and clone scripts
+        run: |
+          mkdir -p ci_workspace/$(dirname ${{ inputs.repo_path }})
+          mv repo_source ci_workspace/${{ inputs.repo_path }}
+          cd ci_workspace
+          git clone --depth 1 https://github.com/spacemit-robotics/scripts.git scripts
+
+      - name: Install lint tools
+        working-directory: ci_workspace
+        run: pip install ruff cpplint
+
+      - name: Lint C/C++
+        working-directory: ci_workspace
+        run: bash scripts/lint/lint_cpp.sh ${{ inputs.repo_path }}
+
+      - name: Lint Python
+        working-directory: ci_workspace
+        run: bash scripts/lint/lint_python.sh ${{ inputs.repo_path }} || true
