@@ -12,7 +12,7 @@ headerguard=basename_no_trailing_underscore
 # Disable checks we don't enforce for this repo/team.
 # - whitespace/indent is disabled because scripts/lint/cpplint.sh enforces
 #   a repo-specific 4-space indentation rule.
-filter=-whitespace/braces,-whitespace/indent,-build/header_guard,-build/include_subdir
+filter=-whitespace/braces,-whitespace/indent,-build/header_guard,-build/include_subdir,-legal/copyright
 
 # Treat headers/sources consistently.
 extensions=c,cc,cpp,cxx,h,hpp,hh,hxx
