@@ -36,9 +36,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
 
       - name: Lint Shell (shellcheck)
-        working-directory: ci_workspace/${{ inputs.repo_path }}
-        run: |
-          find . -name '*.sh' -type f -print0 | xargs -0 -r shellcheck -e SC1091
+        working-directory: ci_workspace
+        run: bash scripts/lint/lint_shell.sh ${{ inputs.repo_path }}
 
       - name: Lint C/C++
         working-directory: ci_workspace
