@@ -58,7 +58,8 @@ filter_cpp_files() {
   # Reads NUL-delimited paths from stdin and outputs NUL-delimited paths of C/C++ files.
   while IFS= read -r -d '' f; do
     case "${f}" in
-      output/*|target/*|components/thirdparty/*) continue ;;
+      output/*|target/*|components/thirdparty/*|*/thirdparty/*) continue ;;
+      */mvx-v4l2-controls.h) continue ;;
     esac
     is_generated_cpp "${f}" && continue
     case "${f}" in
@@ -215,7 +216,8 @@ list_cpp_files_find() {
   if [[ -f "${base}" ]]; then
     # Single file
     case "${base}" in
-      output/*|target/*|components/thirdparty/*) return 0 ;;
+      output/*|target/*|components/thirdparty/*|*/thirdparty/*) return 0 ;;
+      */mvx-v4l2-controls.h) return 0 ;;
       *.c|*.cc|*.cpp|*.cxx|*.h|*.hpp|*.hh|*.hxx)
         is_generated_cpp "${base}" || printf '%s\0' "${base}"
         ;;
@@ -229,6 +231,8 @@ list_cpp_files_find() {
     -not -path '*/output/*' \
     -not -path '*/target/*' \
     -not -path '*/components/thirdparty/*' \
+    -not -path '*/thirdparty/*' \
+    -not -name 'mvx-v4l2-controls.h' \
     -not -path '*/build/*' \
     -not -path '*/install/*' \
     -not -path '*/log/*' \
@@ -332,5 +336,3 @@ else
 fi
 
 exit "${had_error}"
-
-
