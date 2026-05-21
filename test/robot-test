@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+#
+# Copyright (C) 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
+# SPDX-License-Identifier: Apache-2.0
+#
+
+set -euo pipefail
+
+sdk_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+runner="${sdk_root}/scripts/test/run_tests.py"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  scripts/test/robot-test list <module>
+  scripts/test/robot-test run <module> [--scope pr|scheduled|release|manual] [--target TARGET] [--category functional|performance|stability] [--output DIR]
+  scripts/test/robot-test target <target> [--scope scheduled|release|manual] [--category functional|performance|stability] [--output DIR]
+
+Examples:
+  scripts/test/robot-test list build
+  scripts/test/robot-test run build
+  scripts/test/robot-test run build --target k3-com260-minimal
+  scripts/test/robot-test target k3-com260-minimal
+EOF
+}
+
+module_safe_name() {
+  printf '%s\n' "$1" | sed 's#^/*##; s#/*$##; s#[/ ][/ ]*#__#g'
+}
+
+cmd="${1:-help}"
+shift || true
+
+case "${cmd}" in
+  list)
+    module="${1:-}"
+    [[ -n "${module}" ]] || { echo "[robot-test] ERROR: module required" >&2; usage >&2; exit 2; }
+    shift || true
+    [[ $# -eq 0 ]] || { echo "[robot-test] ERROR: unexpected argument: $1" >&2; exit 2; }
+    exec python3 "${runner}" list --module "${module}"
+    ;;
+
+  run)
+    module="${1:-}"
+    [[ -n "${module}" ]] || { echo "[robot-test] ERROR: module required" >&2; usage >&2; exit 2; }
+    shift || true
+
+    scope="pr"
+    target="${CI_BUILD_TARGET:-}"
+    category=""
+    output=""
+
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --scope)
+          [[ $# -ge 2 ]] || { echo "[robot-test] ERROR: --scope requires a value" >&2; exit 2; }
+          scope="$2"
+          shift 2
+          ;;
+        --target)
+          [[ $# -ge 2 ]] || { echo "[robot-test] ERROR: --target requires a value" >&2; exit 2; }
+          target="$2"
+          shift 2
+          ;;
+        --category)
+          [[ $# -ge 2 ]] || { echo "[robot-test] ERROR: --category requires a value" >&2; exit 2; }
+          category="$2"
+          shift 2
+          ;;
+        --output)
+          [[ $# -ge 2 ]] || { echo "[robot-test] ERROR: --output requires a value" >&2; exit 2; }
+          output="$2"
+          shift 2
+          ;;
+        -h|--help)
+          usage
+          exit 0
+          ;;
+        *)
+          echo "[robot-test] ERROR: unknown argument: $1" >&2
+          usage >&2
+          exit 2
+          ;;
+      esac
+    done
+
+    if [[ -z "${output}" ]]; then
+      output="output/test/${scope}/$(module_safe_name "${module}")"
+    fi
+
+    args=(run --module "${module}" --scope "${scope}" --output "${output}")
+    [[ -n "${target}" ]] && args+=(--target "${target}")
+    [[ -n "${category}" ]] && args+=(--category "${category}")
+    exec python3 "${runner}" "${args[@]}"
+    ;;
+
+  target)
+    target="${1:-}"
+    [[ -n "${target}" ]] || { echo "[robot-test] ERROR: target required" >&2; usage >&2; exit 2; }
+    shift || true
+
+    scope="scheduled"
+    category=""
+    output=""
+
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --scope)
+          [[ $# -ge 2 ]] || { echo "[robot-test] ERROR: --scope requires a value" >&2; exit 2; }
+          scope="$2"
+          shift 2
+          ;;
+        --category)
+          [[ $# -ge 2 ]] || { echo "[robot-test] ERROR: --category requires a value" >&2; exit 2; }
+          category="$2"
+          shift 2
+          ;;
+        --output)
+          [[ $# -ge 2 ]] || { echo "[robot-test] ERROR: --output requires a value" >&2; exit 2; }
+          output="$2"
+          shift 2
+          ;;
+        -h|--help)
+          usage
+          exit 0
+          ;;
+        *)
+          echo "[robot-test] ERROR: unknown argument: $1" >&2
+          usage >&2
+          exit 2
+          ;;
+      esac
+    done
+
+    if [[ -z "${output}" ]]; then
+      output="output/test/${target}"
+    fi
+
+    args=(run-target --target "${target}" --scope "${scope}" --output "${output}")
+    [[ -n "${category}" ]] && args+=(--category "${category}")
+    exec python3 "${runner}" "${args[@]}"
+    ;;
+
+  -h|--help|help)
+    usage
+    ;;
+
+  *)
+    echo "[robot-test] ERROR: unknown command: ${cmd}" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
