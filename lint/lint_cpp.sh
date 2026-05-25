@@ -104,6 +104,50 @@ extract_guard_macro() {
   printf '%s:%s\n' "${line_num}" "${macro}"
 }
 
+line_matches_header_guard_nolint() {
+  local line="$1"
+  local marker="$2"
+  local args check
+
+  if printf '%s\n' "${line}" | grep -Eq "${marker}\\("; then
+    args="$(printf '%s\n' "${line}" | sed -nE "s/.*${marker}\\(([^)]*)\\).*/\\1/p" | head -n1)"
+    while IFS= read -r check; do
+      check="${check#"${check%%[![:space:]]*}"}"
+      check="${check%"${check##*[![:space:]]}"}"
+      if [[ "${check}" == "build/header_guard" || "${check}" == "*" ]]; then
+        return 0
+      fi
+    done < <(printf '%s\n' "${args}" | tr ',' '\n')
+    return 1
+  fi
+
+  if printf '%s\n' "${line}" | grep -Eq "${marker}([[:space:]]|$)"; then
+    return 0
+  fi
+  return 1
+}
+
+line_has_header_guard_nolint() {
+  local f="$1"
+  local line_no="$2"
+  local current prev_line prev
+
+  current="$(sed -n "${line_no}p" "${f}" || true)"
+  if line_matches_header_guard_nolint "${current}" "NOLINT"; then
+    return 0
+  fi
+
+  prev_line=$((line_no - 1))
+  if (( prev_line > 0 )); then
+    prev="$(sed -n "${prev_line}p" "${f}" || true)"
+    if line_matches_header_guard_nolint "${prev}" "NOLINTNEXTLINE"; then
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
 check_header_guards_basename_no_trailing_underscore() {
   local -a files=("$@")
   local had=0
@@ -129,6 +173,11 @@ check_header_guards_basename_no_trailing_underscore() {
     ifndef_macro="${ifndef_hit#*:}"
     define_line="${define_hit%%:*}"
     define_macro="${define_hit#*:}"
+
+    if line_has_header_guard_nolint "${f}" "${ifndef_line}" || \
+       line_has_header_guard_nolint "${f}" "${define_line}"; then
+      continue
+    fi
 
     if [[ "${ifndef_macro}" != "${expected}" ]]; then
       echo "${f}:${ifndef_line}: header guard macro should be ${expected} (got ${ifndef_macro})"
