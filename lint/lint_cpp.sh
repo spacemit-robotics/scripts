@@ -57,8 +57,8 @@ fi
 filter_cpp_files() {
   # Reads NUL-delimited paths from stdin and outputs NUL-delimited paths of C/C++ files.
   while IFS= read -r -d '' f; do
+    is_excluded_lint_path "${f}" && continue
     case "${f}" in
-      output/*|target/*|components/thirdparty/*|*/thirdparty/*) continue ;;
       */mvx-v4l2-controls.h) continue ;;
     esac
     is_generated_cpp "${f}" && continue
@@ -66,6 +66,28 @@ filter_cpp_files() {
       *.c|*.cc|*.cpp|*.cxx|*.h|*.hpp|*.hh|*.hxx) printf '%s\0' "${f}" ;;
     esac
   done
+}
+
+is_excluded_lint_path() {
+  local f="$1"
+  case "${f}" in
+    .git|.git/*|*/.git|*/.git/*) return 0 ;;
+    .repo|.repo/*|*/.repo|*/.repo/*) return 0 ;;
+    .pytest_cache|.pytest_cache/*|*/.pytest_cache|*/.pytest_cache/*) return 0 ;;
+    .ruff_cache|.ruff_cache/*|*/.ruff_cache|*/.ruff_cache/*) return 0 ;;
+    .venv|.venv/*|*/.venv|*/.venv/*) return 0 ;;
+    venv|venv/*|*/venv|*/venv/*) return 0 ;;
+    __pycache__|__pycache__/*|*/__pycache__|*/__pycache__/*) return 0 ;;
+    node_modules|node_modules/*|*/node_modules|*/node_modules/*) return 0 ;;
+    output|output/*|*/output|*/output/*) return 0 ;;
+    target|target/*|*/target|*/target/*) return 0 ;;
+    build|build/*|*/build|*/build/*) return 0 ;;
+    install|install/*|*/install|*/install/*) return 0 ;;
+    log|log/*|*/log|*/log/*) return 0 ;;
+    components/thirdparty|components/thirdparty/*|*/components/thirdparty|*/components/thirdparty/*) return 0 ;;
+    thirdparty|thirdparty/*|*/thirdparty|*/thirdparty/*) return 0 ;;
+  esac
+  return 1
 }
 
 is_generated_cpp() {
@@ -264,8 +286,8 @@ list_cpp_files_find() {
 
   if [[ -f "${base}" ]]; then
     # Single file
+    is_excluded_lint_path "${base}" && return 0
     case "${base}" in
-      output/*|target/*|components/thirdparty/*|*/thirdparty/*) return 0 ;;
       */mvx-v4l2-controls.h) return 0 ;;
       *.c|*.cc|*.cpp|*.cxx|*.h|*.hpp|*.hh|*.hxx)
         is_generated_cpp "${base}" || printf '%s\0' "${base}"
@@ -275,17 +297,14 @@ list_cpp_files_find() {
   fi
 
   # Directory (or ".")
-  find "${base}" -type f \
+  find "${base}" \
+    \( -path '*/.git' -o -path '*/.repo' -o -path '*/.pytest_cache' -o -path '*/.ruff_cache' -o \
+       -path '*/.venv' -o -path '*/venv' -o -path '*/__pycache__' -o -path '*/node_modules' -o \
+       -path '*/output' -o -path '*/target' -o -path '*/build' -o -path '*/install' -o -path '*/log' -o \
+       -path '*/components/thirdparty' -o -path '*/thirdparty' \) -prune -o \
+    -type f \
     \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name '*.hpp' -o -name '*.hh' -o -name '*.hxx' \) \
-    -not -path '*/output/*' \
-    -not -path '*/target/*' \
-    -not -path '*/components/thirdparty/*' \
-    -not -path '*/thirdparty/*' \
-    -not -name 'mvx-v4l2-controls.h' \
-    -not -path '*/build/*' \
-    -not -path '*/install/*' \
-    -not -path '*/log/*' \
-    -print0 | while IFS= read -r -d '' f; do
+    ! -name 'mvx-v4l2-controls.h' -print0 | while IFS= read -r -d '' f; do
       is_generated_cpp "${f}" || printf '%s\0' "${f}"
     done
 }
@@ -348,7 +367,7 @@ fi
 # cpplint returns non-zero when issues are found (desired for CI).
 # Always pass --repository=. so header-guard derivation is stable even outside a git checkout.
 had_error=0
-BASE_ARGS=(--repository="." "${CONFIG_ARGS[@]}")
+BASE_ARGS=(--repository="." --quiet "${CONFIG_ARGS[@]}")
 
 if ! check_indentation_4_spaces "${FILES[@]}"; then
   echo "[cpplint] indentation check failed (rule=4 spaces)."
