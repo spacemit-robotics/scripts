@@ -28,13 +28,33 @@ fi
 filter_shell_files() {
   # Reads NUL-delimited paths from stdin and outputs NUL-delimited shell files.
   while IFS= read -r -d '' f; do
-    case "${f}" in
-      output/*|target/*|components/thirdparty/*) continue ;;
-    esac
+    is_excluded_lint_path "${f}" && continue
     case "${f}" in
       *.sh) printf '%s\0' "${f}" ;;
     esac
   done
+}
+
+is_excluded_lint_path() {
+  local f="$1"
+  case "${f}" in
+    .git|.git/*|*/.git|*/.git/*) return 0 ;;
+    .repo|.repo/*|*/.repo|*/.repo/*) return 0 ;;
+    .pytest_cache|.pytest_cache/*|*/.pytest_cache|*/.pytest_cache/*) return 0 ;;
+    .ruff_cache|.ruff_cache/*|*/.ruff_cache|*/.ruff_cache/*) return 0 ;;
+    .venv|.venv/*|*/.venv|*/.venv/*) return 0 ;;
+    venv|venv/*|*/venv|*/venv/*) return 0 ;;
+    __pycache__|__pycache__/*|*/__pycache__|*/__pycache__/*) return 0 ;;
+    node_modules|node_modules/*|*/node_modules|*/node_modules/*) return 0 ;;
+    output|output/*|*/output|*/output/*) return 0 ;;
+    target|target/*|*/target|*/target/*) return 0 ;;
+    build|build/*|*/build|*/build/*) return 0 ;;
+    install|install/*|*/install|*/install/*) return 0 ;;
+    log|log/*|*/log|*/log/*) return 0 ;;
+    components/thirdparty|components/thirdparty/*|*/components/thirdparty|*/components/thirdparty/*) return 0 ;;
+    thirdparty|thirdparty/*|*/thirdparty|*/thirdparty/*) return 0 ;;
+  esac
+  return 1
 }
 
 is_git_repo() {
@@ -47,18 +67,19 @@ list_shell_files_find() {
   local base="${1:-.}"
 
   if [[ -f "${base}" ]]; then
+    is_excluded_lint_path "${base}" && return 0
     case "${base}" in
-      output/*|target/*|components/thirdparty/*) return 0 ;;
       *.sh) printf '%s\0' "${base}" ;;
     esac
     return 0
   fi
 
-  find "${base}" -type f -name '*.sh' \
-    -not -path '*/output/*' \
-    -not -path '*/target/*' \
-    -not -path '*/components/thirdparty/*' \
-    -print0
+  find "${base}" \
+    \( -path '*/.git' -o -path '*/.repo' -o -path '*/.pytest_cache' -o -path '*/.ruff_cache' -o \
+       -path '*/.venv' -o -path '*/venv' -o -path '*/__pycache__' -o -path '*/node_modules' -o \
+       -path '*/output' -o -path '*/target' -o -path '*/build' -o -path '*/install' -o -path '*/log' -o \
+       -path '*/components/thirdparty' -o -path '*/thirdparty' \) -prune -o \
+    -type f -name '*.sh' -print0
 }
 
 TARGET_PATH="${1:-}"
