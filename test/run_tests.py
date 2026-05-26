@@ -249,10 +249,38 @@ def pyenv_root(env: dict[str, str]) -> pathlib.Path:
     ).expanduser()
 
 
+def pyenv_readlink_shim(env: dict[str, str], root_path: pathlib.Path) -> pathlib.Path | None:
+    readlink = pathlib.Path(
+        env.get("SROBOTIS_TEST_GNU_READLINK")
+        or os.environ.get("SROBOTIS_TEST_GNU_READLINK")
+        or "/usr/bin/gnureadlink"
+    )
+    if not readlink.exists():
+        return None
+
+    tool_dir = root_path.parent / ".srobotis-pyenv-tools"
+    tool_dir.mkdir(parents=True, exist_ok=True)
+    shim = tool_dir / "readlink"
+    if shim.exists() or shim.is_symlink():
+        try:
+            if shim.resolve() == readlink.resolve():
+                return tool_dir
+        except OSError:
+            pass
+        shim.unlink()
+    shim.symlink_to(readlink)
+    return tool_dir
+
+
 def pyenv_env(env: dict[str, str], root_path: pathlib.Path) -> dict[str, str]:
     new_env = dict(env)
+    path_parts = [str(root_path / "bin")]
+    readlink_shim = pyenv_readlink_shim(env, root_path)
+    if readlink_shim is not None:
+        path_parts.append(str(readlink_shim))
+    path_parts.append(new_env.get("PATH", ""))
     new_env["PYENV_ROOT"] = str(root_path)
-    new_env["PATH"] = os.pathsep.join([str(root_path / "bin"), new_env.get("PATH", "")])
+    new_env["PATH"] = os.pathsep.join(path_parts)
     return new_env
 
 
