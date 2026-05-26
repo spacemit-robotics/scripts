@@ -7,16 +7,17 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
 import pathlib
+import re
 import shlex
 import shutil
 import subprocess
 import sys
 import time
-import venv
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,6 +30,8 @@ except ImportError as exc:  # pragma: no cover - depends on system image.
 
 VALID_CATEGORIES = {"functional", "performance", "stability"}
 VALID_SCOPES = {"pr", "scheduled", "release", "manual"}
+PYENV_GIT_URL = "https://github.com/pyenv/pyenv.git"
+PYENV_VERSION_RE = re.compile(r"^(?:python)?(?P<version>\d+\.\d+\.\d+)$")
 
 
 @dataclass
@@ -219,10 +222,11 @@ def check_requires(root: pathlib.Path, requires: dict[str, Any], env: dict[str, 
     return missing
 
 
-def python_env_hash(root: pathlib.Path, case: TestCase) -> str:
+def python_env_hash(root: pathlib.Path, case: TestCase, python_identity: str = "") -> str:
     h = hashlib.sha256()
     h.update(case.module.encode())
     h.update(json.dumps(case.python_env or {}, sort_keys=True).encode())
+    h.update(python_identity.encode())
     for rel in ("pyproject.toml", "requirements.txt", "tests/requirements.txt"):
         path = root / case.module / rel
         if path.exists():
@@ -231,45 +235,188 @@ def python_env_hash(root: pathlib.Path, case: TestCase) -> str:
     return h.hexdigest()[:16]
 
 
+def python_env_spec(case: TestCase) -> str:
+    if not case.python_env:
+        return "python3"
+    return str(case.python_env.get("python") or "python3").strip() or "python3"
+
+
+def pyenv_root(env: dict[str, str]) -> pathlib.Path:
+    return pathlib.Path(
+        env.get("SROBOTIS_TEST_PYENV_ROOT")
+        or os.environ.get("SROBOTIS_TEST_PYENV_ROOT")
+        or "~/.pyenv"
+    ).expanduser()
+
+
+def pyenv_env(env: dict[str, str], root_path: pathlib.Path) -> dict[str, str]:
+    new_env = dict(env)
+    new_env["PYENV_ROOT"] = str(root_path)
+    new_env["PATH"] = os.pathsep.join([str(root_path / "bin"), new_env.get("PATH", "")])
+    return new_env
+
+
+def normalize_pyenv_version(spec: str) -> str | None:
+    match = PYENV_VERSION_RE.fullmatch(spec)
+    return match.group("version") if match else None
+
+
+def run_logged(argv: list[str], *, cwd: pathlib.Path, env: dict[str, str], log_file) -> None:
+    print(f"[run-tests] $ {' '.join(shlex.quote(item) for item in argv)}", file=log_file)
+    subprocess.run(
+        argv,
+        cwd=cwd,
+        env=env,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        check=True,
+    )
+
+
+def ensure_pyenv(env: dict[str, str], log_file) -> pathlib.Path:
+    root_path = pyenv_root(env)
+    pyenv_bin = root_path / "bin" / "pyenv"
+    if pyenv_bin.exists():
+        return pyenv_bin
+
+    root_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = root_path.parent / ".srobotis-pyenv.lock"
+    with lock_path.open("w", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        if pyenv_bin.exists():
+            return pyenv_bin
+        if root_path.exists() and any(root_path.iterdir()):
+            raise RuntimeError(f"pyenv root exists but pyenv is incomplete: {root_path}")
+        git = shutil.which("git", path=env.get("PATH"))
+        if not git:
+            raise RuntimeError("git is required to install pyenv")
+        url = env.get("SROBOTIS_TEST_PYENV_GIT_URL") or os.environ.get("SROBOTIS_TEST_PYENV_GIT_URL") or PYENV_GIT_URL
+        run_logged(
+            [git, "clone", "--depth", "1", url, str(root_path)],
+            cwd=root_path.parent,
+            env=env,
+            log_file=log_file,
+        )
+        if not pyenv_bin.exists():
+            raise RuntimeError(f"pyenv install did not create {pyenv_bin}")
+        return pyenv_bin
+
+
+def ensure_pyenv_python(version: str, env: dict[str, str], log_file) -> pathlib.Path:
+    root_path = pyenv_root(env)
+    pyenv_bin = ensure_pyenv(env, log_file)
+    python_path = root_path / "versions" / version / "bin" / "python"
+    if python_path.exists():
+        return python_path
+
+    lock_path = root_path.parent / f".srobotis-pyenv-{version}.lock"
+    with lock_path.open("w", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        if python_path.exists():
+            return python_path
+        run_logged(
+            [str(pyenv_bin), "install", "-s", version],
+            cwd=root_path,
+            env=pyenv_env(env, root_path),
+            log_file=log_file,
+        )
+        if not python_path.exists():
+            raise RuntimeError(f"pyenv did not create Python {version}: {python_path}")
+        return python_path
+
+
+def resolve_python_interpreter(spec: str, env: dict[str, str], log_file) -> pathlib.Path:
+    path_spec = pathlib.Path(spec).expanduser()
+    if path_spec.is_absolute() or "/" in spec:
+        if path_spec.exists():
+            return path_spec
+        raise RuntimeError(f"python interpreter not found: {spec}")
+
+    py_path = shutil.which(spec, path=env.get("PATH"))
+    if py_path:
+        return pathlib.Path(py_path)
+
+    version = normalize_pyenv_version(spec)
+    if version is None:
+        raise RuntimeError(
+            f"python interpreter not found: {spec}; "
+            "for pyenv auto-install use a full patch version such as 3.12.3"
+        )
+    return ensure_pyenv_python(version, env, log_file)
+
+
+def python_version(python_path: pathlib.Path, env: dict[str, str]) -> str:
+    proc = subprocess.run(
+        [str(python_path), "--version"],
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=True,
+    )
+    return proc.stdout.strip()
+
+
+def ready_marker_matches(marker: pathlib.Path, expected: dict[str, Any], venv_python: pathlib.Path) -> bool:
+    if not marker.exists() or not venv_python.exists():
+        return False
+    try:
+        actual = json.loads(marker.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return False
+    return actual == expected
+
+
 def prepare_python_env(root: pathlib.Path, case: TestCase, env: dict[str, str], log_file) -> dict[str, str]:
     if not case.python_env:
         return env
 
-    py = str(case.python_env.get("python") or "python3")
-    py_path = shutil.which(py, path=env.get("PATH"))
-    if not py_path:
-        raise RuntimeError(f"python interpreter not found: {py}")
+    py = python_env_spec(case)
+    py_path = resolve_python_interpreter(py, env, log_file)
+    py_version = python_version(py_path, env)
+    python_identity = f"{py}|{py_path}|{py_version}"
 
-    venv_dir = root / "output" / "test" / "venvs" / module_safe_name(case.module) / python_env_hash(root, case)
+    venv_dir = root / "output" / "test" / "venvs" / module_safe_name(case.module) / python_env_hash(root, case, python_identity)
     marker = venv_dir / ".srobotis-ready"
-    if not marker.exists():
+    venv_python = venv_dir / "bin" / "python"
+    expected_marker = {
+        "python": py,
+        "resolved_python": str(py_path),
+        "python_version": py_version,
+        "python_env": case.python_env or {},
+        "install": as_str_list((case.python_env or {}).get("install")),
+    }
+    if not ready_marker_matches(marker, expected_marker, venv_python):
         if venv_dir.exists():
             shutil.rmtree(venv_dir)
         venv_dir.parent.mkdir(parents=True, exist_ok=True)
         print(f"[run-tests] create python env: {venv_dir}", file=log_file)
-        venv.EnvBuilder(with_pip=True).create(venv_dir)
+        print(f"[run-tests] python: {py_path} ({py_version})", file=log_file)
+        run_logged(
+            [str(py_path), "-m", "venv", str(venv_dir)],
+            cwd=root / case.module,
+            env=env,
+            log_file=log_file,
+        )
 
-        venv_python = venv_dir / "bin" / "python"
-        subprocess.run(
+        run_logged(
             [str(venv_python), "-m", "pip", "install", "--upgrade", "pip"],
             cwd=root / case.module,
             env=env,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            check=True,
+            log_file=log_file,
         )
         for install in as_str_list(case.python_env.get("install")):
             cmd = [str(venv_python), "-m", "pip", "install", *shlex.split(install)]
-            print(f"[run-tests] $ {' '.join(cmd)}", file=log_file)
-            subprocess.run(
+            run_logged(
                 cmd,
                 cwd=root / case.module,
                 env=env,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                check=True,
+                log_file=log_file,
             )
-        marker.write_text("ready\n", encoding="utf-8")
+        marker.write_text(
+            json.dumps(expected_marker, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
 
     new_env = dict(env)
     new_env["VIRTUAL_ENV"] = str(venv_dir)
