@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>srobotis_test</name>
+  <version>0.1.0</version>
+  <description>Robot test runner and pyenv Python build dependencies.</description>
+  <maintainer email="dev@spacemit.com">Spacemit Robotics</maintainer>
+  <license>Apache-2.0</license>
+
+  <system_depend>build-essential</system_depend>
+  <system_depend>pkg-config</system_depend>
+  <system_depend>git</system_depend>
+  <system_depend>curl</system_depend>
+  <system_depend>wget</system_depend>
+  <system_depend>libffi-dev</system_depend>
+  <system_depend>libssl-dev</system_depend>
+  <system_depend>zlib1g-dev</system_depend>
+  <system_depend>libbz2-dev</system_depend>
+  <system_depend>libreadline-dev</system_depend>
+  <system_depend>libsqlite3-dev</system_depend>
+  <system_depend>liblzma-dev</system_depend>
+  <system_depend>xz-utils</system_depend>
+
+  <export>
+    <!-- Dependency anchor only. -->
+  </export>
+</package>

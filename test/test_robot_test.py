@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -64,6 +67,20 @@ def run_robot_test(sdk: Path, log_path: Path, *args: str) -> subprocess.Complete
 
 def read_args(log_path: Path) -> list[str]:
     return json.loads(log_path.read_text(encoding="utf-8"))
+
+
+def load_run_tests_module():
+    module_name = "srobotis_run_tests_under_test"
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        SCRIPT_ROOT / "test" / "run_tests.py",
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_robot_test_list_expands_to_runner_list(tmp_path: Path) -> None:
@@ -141,3 +158,79 @@ def test_robot_test_target_defaults_to_scheduled_output(tmp_path: Path) -> None:
         "--output",
         "output/test/k3-com260-minimal",
     ]
+
+
+def test_run_tests_installs_missing_toolchain_dependencies(tmp_path: Path, monkeypatch) -> None:
+    run_tests = load_run_tests_module()
+    package_xml = tmp_path / "package.xml"
+    installed = tmp_path / "installed.txt"
+    tool_log = tmp_path / "tool.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    installed.write_text("present-pkg\n", encoding="utf-8")
+    package_xml.write_text(
+        """
+        <?xml version="1.0"?>
+        <package format="3">
+          <name>srobotis_test</name>
+          <version>0.1.0</version>
+          <description>test</description>
+          <maintainer email="dev@example.com">dev</maintainer>
+          <license>Apache-2.0</license>
+          <system_depend>present-pkg</system_depend>
+          <system_depend>missing-one</system_depend>
+          <system_depend>missing-two</system_depend>
+        </package>
+        """.strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    write_file(
+        bin_dir / "dpkg",
+        f"""
+        #!/bin/sh
+        echo "dpkg $@" >> {shlex.quote(str(tool_log))}
+        if [ "$1" = "-s" ] && grep -qx "$2" {shlex.quote(str(installed))}; then
+          exit 0
+        fi
+        exit 1
+        """,
+        executable=True,
+    )
+    write_file(
+        bin_dir / "apt-get",
+        f"""
+        #!/bin/sh
+        echo "apt-get $@" >> {shlex.quote(str(tool_log))}
+        if [ "$1" = "install" ]; then
+          shift
+          for arg in "$@"; do
+            [ "$arg" = "-y" ] && continue
+            grep -qx "$arg" {shlex.quote(str(installed))} || \\
+              echo "$arg" >> {shlex.quote(str(installed))}
+          done
+        fi
+        exit 0
+        """,
+        executable=True,
+    )
+
+    monkeypatch.setattr(run_tests, "test_toolchain_package_xml", lambda: package_xml)
+    monkeypatch.setattr(run_tests.os, "geteuid", lambda: 0)
+    env = {
+        "PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")]),
+        "SROBOTIS_TEST_PYENV_ROOT": str(tmp_path / "pyenv"),
+    }
+
+    with (tmp_path / "run.log").open("w", encoding="utf-8") as log_file:
+        identity = run_tests.ensure_test_toolchain_dependencies(env, log_file)
+
+    assert identity
+    assert installed.read_text(encoding="utf-8").splitlines() == [
+        "present-pkg",
+        "missing-one",
+        "missing-two",
+    ]
+    log = tool_log.read_text(encoding="utf-8")
+    assert "apt-get update" in log
+    assert "apt-get install -y missing-one missing-two" in log

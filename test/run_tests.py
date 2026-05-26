@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Any
 
@@ -36,6 +37,7 @@ DEFAULT_PIP_INDEX_URL = "https://git.spacemit.com/api/v4/projects/33/packages/py
 DEFAULT_PIP_EXTRA_INDEX_URLS = ["https://mirrors.aliyun.com/pypi/simple/"]
 DEFAULT_PIP_RETRIES = "3"
 DEFAULT_PIP_TIMEOUT = "15"
+_TOOLCHAIN_DEPS_READY: set[str] = set()
 
 
 @dataclass
@@ -111,6 +113,118 @@ def bool_config(value: Any, *, default: bool) -> bool:
     if text in {"0", "false", "no", "off"}:
         return False
     return default
+
+
+def test_toolchain_package_xml() -> pathlib.Path:
+    return pathlib.Path(__file__).resolve().parent / "package.xml"
+
+
+def read_test_toolchain_dependencies() -> list[str]:
+    package_xml = test_toolchain_package_xml()
+    if not package_xml.exists():
+        return []
+    root = ET.parse(package_xml).getroot()
+    deps: list[str] = []
+    seen: set[str] = set()
+    for item in root.findall("system_depend"):
+        name = (item.text or "").strip()
+        if name and name not in seen:
+            deps.append(name)
+            seen.add(name)
+    return deps
+
+
+def test_toolchain_identity() -> str:
+    package_xml = test_toolchain_package_xml()
+    if not package_xml.exists():
+        return ""
+    return hashlib.sha256(package_xml.read_bytes()).hexdigest()
+
+
+def package_installed(name: str, env: dict[str, str]) -> bool:
+    return (
+        subprocess.run(
+            ["dpkg", "-s", name],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
+def root_command(argv: list[str], env: dict[str, str]) -> list[str]:
+    if os.geteuid() == 0:
+        return argv
+    sudo = shutil.which("sudo", path=env.get("PATH"))
+    if sudo:
+        return [sudo, *argv]
+    raise RuntimeError(f"sudo is required to run: {' '.join(argv)}")
+
+
+def ensure_test_toolchain_dependencies(env: dict[str, str], log_file) -> str:
+    identity = test_toolchain_identity()
+    if not identity or identity in _TOOLCHAIN_DEPS_READY:
+        return identity
+
+    deps = read_test_toolchain_dependencies()
+    if not deps:
+        _TOOLCHAIN_DEPS_READY.add(identity)
+        return identity
+
+    lock_path = pyenv_root(env).parent / ".srobotis-test-toolchain-deps.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        missing = [name for name in deps if not package_installed(name, env)]
+        if missing:
+            print(f"[run-tests] installing test toolchain dependencies: {' '.join(missing)}", file=log_file)
+            apt_get = (
+                env.get("SROBOTIS_TEST_APT_GET")
+                or os.environ.get("SROBOTIS_TEST_APT_GET")
+                or env.get("APT_GET_BIN")
+                or os.environ.get("APT_GET_BIN")
+                or "apt-get"
+            )
+            apt_env = dict(env)
+            apt_env["DEBIAN_FRONTEND"] = "noninteractive"
+            run_logged(
+                root_command([apt_get, "update"], env),
+                cwd=pathlib.Path("/"),
+                env=apt_env,
+                log_file=log_file,
+            )
+            run_logged(
+                root_command([apt_get, "install", "-y", *missing], env),
+                cwd=pathlib.Path("/"),
+                env=apt_env,
+                log_file=log_file,
+            )
+            still_missing = [name for name in deps if not package_installed(name, env)]
+            if still_missing:
+                raise RuntimeError(
+                    "test toolchain dependencies are still missing after install: "
+                    + " ".join(still_missing)
+                )
+
+    _TOOLCHAIN_DEPS_READY.add(identity)
+    return identity
+
+
+def pyenv_toolchain_marker_matches(version_dir: pathlib.Path, identity: str) -> bool:
+    if not identity:
+        return True
+    marker = version_dir / ".srobotis-test-toolchain"
+    try:
+        return marker.read_text(encoding="utf-8").strip() == identity
+    except OSError:
+        return False
+
+
+def write_pyenv_toolchain_marker(version_dir: pathlib.Path, identity: str) -> None:
+    if identity:
+        (version_dir / ".srobotis-test-toolchain").write_text(identity + "\n", encoding="utf-8")
 
 
 def load_test_cases(root: pathlib.Path, module: str) -> list[TestCase]:
@@ -438,16 +552,29 @@ def ensure_pyenv(env: dict[str, str], log_file) -> pathlib.Path:
 
 def ensure_pyenv_python(version: str, env: dict[str, str], log_file) -> pathlib.Path:
     root_path = pyenv_root(env)
+    toolchain_identity = ensure_test_toolchain_dependencies(env, log_file)
     pyenv_bin = ensure_pyenv(env, log_file)
-    python_path = root_path / "versions" / version / "bin" / "python"
-    if python_path.exists():
+    version_dir = root_path / "versions" / version
+    python_path = version_dir / "bin" / "python"
+    if python_path.exists() and pyenv_toolchain_marker_matches(version_dir, toolchain_identity):
         return python_path
 
     lock_path = root_path.parent / f".srobotis-pyenv-{version}.lock"
     with lock_path.open("w", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
-        if python_path.exists():
+        if python_path.exists() and pyenv_toolchain_marker_matches(version_dir, toolchain_identity):
             return python_path
+        if python_path.exists():
+            print(
+                f"[run-tests] rebuild pyenv Python {version}: test toolchain dependencies changed",
+                file=log_file,
+            )
+            run_logged(
+                [str(pyenv_bin), "uninstall", "-f", version],
+                cwd=root_path,
+                env=pyenv_env(env, root_path),
+                log_file=log_file,
+            )
         run_logged(
             [str(pyenv_bin), "install", "-s", version],
             cwd=root_path,
@@ -456,6 +583,7 @@ def ensure_pyenv_python(version: str, env: dict[str, str], log_file) -> pathlib.
         )
         if not python_path.exists():
             raise RuntimeError(f"pyenv did not create Python {version}: {python_path}")
+        write_pyenv_toolchain_marker(version_dir, toolchain_identity)
         return python_path
 
 
