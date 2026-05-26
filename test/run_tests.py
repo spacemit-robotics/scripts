@@ -376,7 +376,14 @@ def prepare_python_env(root: pathlib.Path, case: TestCase, env: dict[str, str], 
     py_version = python_version(py_path, env)
     python_identity = f"{py}|{py_path}|{py_version}"
 
-    venv_dir = root / "output" / "test" / "venvs" / module_safe_name(case.module) / python_env_hash(root, case, python_identity)
+    venv_dir = (
+        root
+        / "output"
+        / "test"
+        / "venvs"
+        / module_safe_name(case.module)
+        / python_env_hash(root, case, python_identity)
+    )
     marker = venv_dir / ".srobotis-ready"
     venv_python = venv_dir / "bin" / "python"
     expected_marker = {
