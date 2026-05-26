@@ -32,6 +32,10 @@ VALID_CATEGORIES = {"functional", "performance", "stability"}
 VALID_SCOPES = {"pr", "scheduled", "release", "manual"}
 PYENV_GIT_URL = "https://github.com/pyenv/pyenv.git"
 PYENV_VERSION_RE = re.compile(r"^(?:python)?(?P<version>\d+\.\d+\.\d+)$")
+DEFAULT_PIP_INDEX_URL = "https://git.spacemit.com/api/v4/projects/33/packages/pypi/simple"
+DEFAULT_PIP_EXTRA_INDEX_URLS = ["https://mirrors.aliyun.com/pypi/simple/"]
+DEFAULT_PIP_RETRIES = "3"
+DEFAULT_PIP_TIMEOUT = "15"
 
 
 @dataclass
@@ -79,6 +83,34 @@ def as_str_list(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value]
     raise ValueError(f"expected string or list, got {type(value).__name__}")
+
+
+def as_url_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if "," in text:
+            return [item.strip() for item in text.split(",") if item.strip()]
+        return [item.strip() for item in text.split() if item.strip()]
+    return [str(value).strip()] if str(value).strip() else []
+
+
+def bool_config(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 def load_test_cases(root: pathlib.Path, module: str) -> list[TestCase]:
@@ -222,11 +254,17 @@ def check_requires(root: pathlib.Path, requires: dict[str, Any], env: dict[str, 
     return missing
 
 
-def python_env_hash(root: pathlib.Path, case: TestCase, python_identity: str = "") -> str:
+def python_env_hash(
+    root: pathlib.Path,
+    case: TestCase,
+    python_identity: str = "",
+    pip_identity: str = "",
+) -> str:
     h = hashlib.sha256()
     h.update(case.module.encode())
     h.update(json.dumps(case.python_env or {}, sort_keys=True).encode())
     h.update(python_identity.encode())
+    h.update(pip_identity.encode())
     for rel in ("pyproject.toml", "requirements.txt", "tests/requirements.txt"):
         path = root / case.module / rel
         if path.exists():
@@ -239,6 +277,74 @@ def python_env_spec(case: TestCase) -> str:
     if not case.python_env:
         return "python3"
     return str(case.python_env.get("python") or "python3").strip() or "python3"
+
+
+def python_env_pip_config(case: TestCase, env: dict[str, str]) -> dict[str, Any]:
+    raw = case.python_env.get("pip") if case.python_env else None
+    pip_config = raw if isinstance(raw, dict) else {}
+    no_index = bool_config(pip_config.get("no_index"), default=False)
+    index_url = str(
+        pip_config.get("index_url")
+        or env.get("SROBOTIS_TEST_PIP_INDEX_URL")
+        or os.environ.get("SROBOTIS_TEST_PIP_INDEX_URL")
+        or DEFAULT_PIP_INDEX_URL
+    ).strip()
+    if "extra_index_urls" in pip_config:
+        extra_index_urls = as_url_list(pip_config.get("extra_index_urls"))
+    elif "extra_index_url" in pip_config:
+        extra_index_urls = as_url_list(pip_config.get("extra_index_url"))
+    else:
+        extra_index_urls = (
+            as_url_list(env.get("SROBOTIS_TEST_PIP_EXTRA_INDEX_URLS"))
+            or as_url_list(os.environ.get("SROBOTIS_TEST_PIP_EXTRA_INDEX_URLS"))
+            or as_url_list(env.get("SROBOTIS_TEST_PIP_EXTRA_INDEX_URL"))
+            or as_url_list(os.environ.get("SROBOTIS_TEST_PIP_EXTRA_INDEX_URL"))
+            or list(DEFAULT_PIP_EXTRA_INDEX_URLS)
+        )
+    prefer_binary = bool_config(pip_config.get("prefer_binary"), default=True)
+    retries = str(
+        pip_config.get("retries")
+        if pip_config.get("retries") is not None
+        else env.get("SROBOTIS_TEST_PIP_RETRIES")
+        or os.environ.get("SROBOTIS_TEST_PIP_RETRIES")
+        or DEFAULT_PIP_RETRIES
+    ).strip()
+    timeout = str(
+        pip_config.get("timeout")
+        if pip_config.get("timeout") is not None
+        else env.get("SROBOTIS_TEST_PIP_TIMEOUT")
+        or os.environ.get("SROBOTIS_TEST_PIP_TIMEOUT")
+        or DEFAULT_PIP_TIMEOUT
+    ).strip()
+    return {
+        "no_index": no_index,
+        "index_url": "" if no_index else index_url,
+        "extra_index_urls": [] if no_index else extra_index_urls,
+        "prefer_binary": prefer_binary,
+        "retries": retries,
+        "timeout": timeout,
+    }
+
+
+def python_env_pip_args(pip_config: dict[str, Any]) -> list[str]:
+    args: list[str] = []
+    if pip_config.get("prefer_binary"):
+        args.append("--prefer-binary")
+    retries = str(pip_config.get("retries") or "").strip()
+    if retries:
+        args.extend(["--retries", retries])
+    timeout = str(pip_config.get("timeout") or "").strip()
+    if timeout:
+        args.extend(["--timeout", timeout])
+    if pip_config.get("no_index"):
+        args.append("--no-index")
+        return args
+    index_url = str(pip_config.get("index_url") or "").strip()
+    if index_url:
+        args.extend(["--index-url", index_url])
+    for url in as_url_list(pip_config.get("extra_index_urls")):
+        args.extend(["--extra-index-url", url])
+    return args
 
 
 def pyenv_root(env: dict[str, str]) -> pathlib.Path:
@@ -403,6 +509,9 @@ def prepare_python_env(root: pathlib.Path, case: TestCase, env: dict[str, str], 
     py_path = resolve_python_interpreter(py, env, log_file)
     py_version = python_version(py_path, env)
     python_identity = f"{py}|{py_path}|{py_version}"
+    pip_config = python_env_pip_config(case, env)
+    pip_identity = json.dumps(pip_config, sort_keys=True)
+    pip_args = python_env_pip_args(pip_config)
 
     venv_dir = (
         root
@@ -410,7 +519,7 @@ def prepare_python_env(root: pathlib.Path, case: TestCase, env: dict[str, str], 
         / "test"
         / "venvs"
         / module_safe_name(case.module)
-        / python_env_hash(root, case, python_identity)
+        / python_env_hash(root, case, python_identity, pip_identity)
     )
     marker = venv_dir / ".srobotis-ready"
     venv_python = venv_dir / "bin" / "python"
@@ -420,6 +529,7 @@ def prepare_python_env(root: pathlib.Path, case: TestCase, env: dict[str, str], 
         "python_version": py_version,
         "python_env": case.python_env or {},
         "install": as_str_list((case.python_env or {}).get("install")),
+        "pip": pip_config,
     }
     if not ready_marker_matches(marker, expected_marker, venv_python):
         if venv_dir.exists():
@@ -435,13 +545,13 @@ def prepare_python_env(root: pathlib.Path, case: TestCase, env: dict[str, str], 
         )
 
         run_logged(
-            [str(venv_python), "-m", "pip", "install", "--upgrade", "pip"],
+            [str(venv_python), "-m", "pip", "install", *pip_args, "--upgrade", "pip"],
             cwd=root / case.module,
             env=env,
             log_file=log_file,
         )
         for install in as_str_list(case.python_env.get("install")):
-            cmd = [str(venv_python), "-m", "pip", "install", *shlex.split(install)]
+            cmd = [str(venv_python), "-m", "pip", "install", *pip_args, *shlex.split(install)]
             run_logged(
                 cmd,
                 cwd=root / case.module,
